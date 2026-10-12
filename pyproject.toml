@@ -3,6 +3,7 @@ name = "quotelab"
 version = "0.1.0"
 description = "Event-driven market-making simulator on public Binance USD-M data"
 authors = [{ name = "true-ali" }]
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.5.6",

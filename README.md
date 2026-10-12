@@ -275,3 +275,7 @@ calibration; each later date is a test day calibrated on the day before it.
 - Add a market-impact model so large orders and hedges move the simulated book.
 - Use longer samples across calm and stressed months, with out-of-sample risk thresholds.
 - Run multi-venue: a cross-venue fair value and hedging on a second exchange.
+
+## License
+
+[MIT](LICENSE).
