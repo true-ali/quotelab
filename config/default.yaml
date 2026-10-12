@@ -1,0 +1,113 @@
+data:
+  base_url: https://data.binance.vision
+  raw_dir: data/raw
+  processed_dir: data/processed
+  symbols: [BTCUSDT, ETHUSDT]
+  dates: ["2024-01-15", "2024-01-16", "2024-01-17", "2024-01-18", "2024-01-19"]
+  daily_kinds: [trades, bookTicker, klines]
+  monthly_kinds: [fundingRate]
+  max_download_gb: 3.0
+
+instruments:
+  BTCUSDT: {tick_size: 0.1, lot_size: 0.001, min_notional: 100.0}
+  ETHUSDT: {tick_size: 0.01, lot_size: 0.001, min_notional: 20.0}
+  SYNTHUSDT: {tick_size: 0.1, lot_size: 0.001, min_notional: 5.0}
+
+fees:
+  maker_bps: 2.0
+  taker_bps: 5.0
+
+engine:
+  data_latency_ms: 5
+  order_latency_ms: 10
+  cancel_latency_ms: 10
+  min_requote_ms: 100
+  timer_ms: 1000
+  sample_ms: 1000
+
+fills:
+  model: queue
+  alpha: 0.5
+  participation: 1.0
+
+strategy:
+  name: glft
+  order_lots: {BTCUSDT: 3, ETHUSDT: 10, SYNTHUSDT: 10}
+  max_inventory_orders: 10
+  fair_value: microprice
+  use_ofi: true
+  ofi_window_s: 5
+  sigma_window_s: 300
+  fixed_half_spread_ticks: 0.5
+  skew_half_spread_ticks: 0.5
+  skew_ticks_per_order: 1.0
+  glft_skew_ticks_per_order: 1.0
+  as_horizon: match_glft
+
+calibration:
+  max_delta_ticks: 20
+  min_hits: 30
+  ofi_horizon_s: 1
+
+risk:
+  kill_switches: false
+  circuit_breakers: false
+  size_ramp: false
+  kill_inventory_orders: 15
+  max_drawdown_bps: 100
+  stale_after_s: 5
+  cooldown_s: 30
+  vol_short_s: 10
+  vol_long_s: 600
+  vol_ratio: 4.0
+  max_spread_bps: 5.0
+  toxicity_window_s: 5
+  toxicity_threshold: 0.8
+  toxicity_min_updates: 20
+  max_gap_s: 2.0
+  ramp_levels: [1, 2, 4]
+  ramp_step_hours: 4
+  hedge_threshold_orders: null
+  hedge_to_orders: 0
+  flatten_on_kill: true
+
+synthetic:
+  symbol: SYNTHUSDT
+  seed: 7
+  start: "2024-01-01T00:00:00Z"
+  duration_s: 3600
+  start_px: 40000.0
+  spread_ticks: 1
+  move_rate_hz: 0.5
+  refresh_rate_hz: 5.0
+  trade_base_rate_hz: 2.0
+  hawkes_alpha: 0.5
+  hawkes_beta: 2.0
+  informed_fraction: 0.2
+  mean_trade_lots: 20
+  mean_level_lots: 100
+  sessions: 5
+
+live:
+  symbol: BTCUSDT
+  warmup_minutes: 15
+  minutes: 60
+  heartbeat_s: 1.0
+  silence_reconnect_s: 10.0
+  backoff_initial_s: 1.0
+  backoff_max_s: 30.0
+  sessions_dir: runs/paper
+  reports_dir: reports/paper
+
+experiments:
+  runs_dir: runs
+  reports_dir: reports
+  workers: 8
+  e1_stress: {alpha: 0.0, participation: 0.5}
+  e3_skew_ticks_per_order: [0.25, 0.5, 1.0, 2.0, 4.0]
+  e3_size_multipliers: [1, 2, 4]
+  e3_max_inventory_orders: [2, 5, 10, 20]
+  e4_latency_ms: [1, 10, 50, 100, 250, 500]
+  e6_padding_hours: 1
+  e7_maker_bps: [2.0, 1.0, 0.0, -0.5, -1.0]
+  e7_rerun_maker_bps: [0.0]

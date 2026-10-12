@@ -1,0 +1,180 @@
+"""Build the report of one dataset: figures, ``RESULTS.md``, the HTML dashboard and the README
+block of key results, all from the files a backtest wrote and nothing typed by hand.
+
+The README keeps one block per dataset between two HTML comment markers. Rebuilding a dataset's
+report replaces only its own block, so the synthetic and real results can sit side by side.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import polars as pl
+
+from quotelab.config import REPO_ROOT, resolve_path
+from quotelab.report import animation, figures, persian
+from quotelab.report.dashboard import render_dashboard
+from quotelab.report.document import Section, markdown_document, markdown_table
+from quotelab.report.sections import (
+    FIGURES,
+    all_sections,
+    ci,
+    frame_table,
+    intro,
+    num,
+    one_row,
+    symbols_in,
+    text,
+    usd,
+)
+from quotelab.report.tables import ReportTables, RunOutputs, load_outputs, report_tables
+
+TITLES = {"synthetic": "QuoteLab results: synthetic data", "real": "QuoteLab results: Binance data"}
+README = REPO_ROOT / "README.md"
+README_FIGURES = ("e1", "e2", "e7")
+REPLAY_FIGURE = "figures/replay.gif"
+
+
+class MissingRuns(RuntimeError):
+    """The dataset has not been backtested yet, so there is nothing to report."""
+
+
+def report_dir(cfg: dict[str, Any], dataset: str) -> Path:
+    return resolve_path(cfg["experiments"]["reports_dir"]) / dataset
+
+
+def write_report(cfg: dict[str, Any], dataset: str) -> Path:
+    """Write every output of one dataset's report and return the path of its ``RESULTS.md``."""
+    runs = resolve_path(cfg["experiments"]["runs_dir"]) / dataset
+    if not (runs / "metrics.parquet").exists():
+        command = "make backtest" if dataset == "synthetic" else "make backtest-real"
+        raise MissingRuns(f"no backtest results in {runs}; run `{command}` first")
+    outputs = load_outputs(runs)
+    tables = report_tables(outputs, cfg)
+    out = report_dir(cfg, dataset)
+    draw_figures(tables, out)
+    sections = [replay_section(outputs, out), *all_sections(tables, cfg)]
+    paragraphs = intro(tables, cfg, dataset)
+    results = out / "RESULTS.md"
+    results.write_text(markdown_document(TITLES[dataset], paragraphs, sections))
+    subtitle = f"{', '.join(tables.symbols)} · {len(tables.test_dates)} test days"
+    (out / "dashboard.html").write_text(
+        render_dashboard(TITLES[dataset], subtitle, paragraphs, sections)
+    )
+    update_readme(README, dataset, readme_block(tables, dataset, sections))
+    update_readme(persian.README_FA, dataset, persian.dataset_block(tables, dataset))
+    return results
+
+
+def draw_figures(t: ReportTables, out: Path) -> None:
+    """Draw every figure into ``out`` at the paths the sections refer to."""
+    path = {anchor: out / relative for anchor, relative in FIGURES.items()}
+    figures.intensity_fit(t.intensity, path["calibration"])
+    figures.e1_realism_ladder(t.realism, path["e1"])
+    figures.e2_strategies(t.strategies, path["e2"])
+    figures.e3_sensitivity(t.sensitivity, path["e3"])
+    figures.e4_latency(t.latency, path["e4"])
+    figures.e5_regimes(t.regimes, path["e5"])
+    figures.e6_event_study(t.event_series, t.windows, path["e6"])
+    figures.e7_fee_tiers(t.fee_tiers, t.fee_reruns, path["e7"])
+    figures.markouts(t.markouts, path["markouts"])
+
+
+def replay_section(outputs: RunOutputs, out: Path) -> Section:
+    """Draw the animated replay of the baseline run into ``out`` and return the section that
+    shows it."""
+    symbol, day, run_dir = animation.baseline_run_dir(outputs)
+    animation.replay_animation(
+        pl.read_parquet(run_dir / "timeseries.parquet"),
+        pl.read_parquet(run_dir / "fills.parquet"),
+        f"{symbol} {day}: baseline glft, busiest {animation.WINDOW_S} s",
+        out / REPLAY_FIGURE,
+    )
+    paragraph = (
+        f"`{symbol}` on {day}, baseline `glft` (the `{animation.BASELINE_VARIANT}` rung of E1): "
+        f"the {animation.WINDOW_S} seconds of the day with the most quote fills, drawn from the "
+        "run's own files. Top: the market's best bid and ask with our buy and sell fills; the "
+        "bid and ask are the run's once-a-second samples, so a fill between two samples can sit "
+        "outside them. Middle: our position. Bottom: the PnL since the window opened."
+    )
+    return Section("replay", "Replay of the baseline run", [paragraph], [], REPLAY_FIGURE)
+
+
+def readme_block(t: ReportTables, dataset: str, sections: list[Section]) -> str:
+    """The README's key results for one dataset: the baseline per symbol, the E1 ladder, the
+    break-even maker fee, three figures and links to the full report."""
+    base = f"reports/{dataset}"
+    lines = [f"### {TITLES[dataset]}", ""]
+    for symbol in symbols_in(t.strategies):
+        glft = one_row(t.strategies, symbol=symbol, variant="glft")
+        be = one_row(t.break_even, symbol=symbol)
+        lines.append(
+            f"- `{symbol}`, baseline `glft` over {glft['n_days']} test days: mean daily PnL "
+            f"{usd(glft['pnl_mean'])}, of which spread {usd(glft['attr_spread'])}, inventory "
+            f"{usd(glft['attr_inventory'])} and fees {usd(glft['attr_fees'])}. "
+            f"Break-even maker fee {be['break_even_maker_bps']:.3f} bps."
+        )
+    ladder = frame_table(
+        "E1 realism ladder (USD per day)",
+        t.realism,
+        [
+            ("Rung", text("variant")),
+            ("Symbol", text("symbol")),
+            ("Mean daily PnL [95% CI]", ci("pnl")),
+            ("Change vs previous rung", num("change_vs_previous")),
+        ],
+    )
+    lines += ["", markdown_table(ladder), ""]
+    titles = {section.anchor: section.title for section in sections}
+    for anchor in README_FIGURES:
+        lines += [f"![{titles[anchor]}]({base}/{FIGURES[anchor]})", ""]
+    lines.append(
+        f"Full write-up with every table: [{base}/RESULTS.md]({base}/RESULTS.md). The same "
+        f"report as a page to open locally: `{base}/dashboard.html`."
+    )
+    if dataset == "real":
+        lines += ["", resume_line(t)]
+    return "\n".join(lines)
+
+
+def resume_line(t: ReportTables) -> str:
+    """A one-sentence project summary for a CV, with its counts and fees taken from this run.
+
+    It states scale and the break-even maker fee, not a profit, because the simulation is not
+    evidence of live profitability.
+    """
+    events = (t.run_cost["runs"] * t.run_cost["mean_events_per_run"]).sum()
+    break_even = ", ".join(
+        f"{row['symbol']} {row['break_even_maker_bps']:.2f} bps"
+        for row in t.break_even.iter_rows(named=True)
+    )
+    needs_rebate = (t.break_even["break_even_maker_bps"] < 0).all()
+    finding = (
+        f"found the baseline breaks even only with a maker rebate (break-even maker fee "
+        f"{break_even})"
+        if needs_rebate
+        else f"measured the break-even maker fee ({break_even})"
+    )
+    return (
+        "**Resume line:** Built QuoteLab, an event-driven market-making simulator in Python "
+        "(asyncio, DuckDB, polars) with GLFT and Avellaneda-Stoikov quoting, a queue-aware fill "
+        "model with latency, PnL attribution, markouts, kill switches and a read-only live "
+        f"paper-trading mode; ran {t.n_runs} backtests over {len(t.test_dates)} test days of "
+        f"Binance {'/'.join(t.symbols)} data ({events / 1e9:,.1f} billion market events "
+        f"replayed in total) and {finding}."
+    )
+
+
+def update_readme(readme: Path, dataset: str, block: str) -> None:
+    """Replace this dataset's block between its markers, or append it when there is none yet."""
+    start = f"<!-- quotelab:results:{dataset}:start -->"
+    end = f"<!-- quotelab:results:{dataset}:end -->"
+    marked = f"{start}\n{block}\n{end}"
+    current = readme.read_text()
+    if start in current and end in current:
+        head, rest = current.split(start, 1)
+        _, tail = rest.split(end, 1)
+        readme.write_text(head + marked + tail)
+    else:
+        readme.write_text(current.rstrip() + "\n\n" + marked + "\n")
