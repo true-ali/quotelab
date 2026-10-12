@@ -1,21 +1,29 @@
 """Figures for the experiment tables in ``quotelab.report.tables``.
 
 Each public function draws one PNG from the frames that the matching table function returns. The
-figures use the object-oriented matplotlib API only, so no global pyplot state is involved.
+figures use the object-oriented matplotlib API only, so no global pyplot state is involved. Callers
+draw and save inside ``styled()``, which applies the light theme and the font sizes of ``STYLE``.
 """
 
+from contextlib import AbstractContextManager
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 import polars as pl
+from matplotlib.artist import Artist
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
-from matplotlib.ticker import NullLocator
+from matplotlib.ticker import NullLocator, StrMethodFormatter
 
-DPI = 150
-PANEL_WIDTH = 5.5
-PANEL_HEIGHT = 4.5
-LEGEND_FONTSIZE = "small"
+DPI = 200
+PANEL_WIDTH = 5.0
+PANEL_HEIGHT = 4.0
+MAX_LEGEND_COLUMNS = 5
+MARKOUT_LEGEND_COLUMNS = 2
+CALIBRATION_LEGEND_COLUMNS = 3
+STRATEGY_LEGEND_COLUMNS = 3
+TITLE_X = 0.01
 
 BLUE = "#0072B2"
 ORANGE = "#E69F00"
@@ -26,17 +34,53 @@ SKY = "#56B4E9"
 YELLOW = "#F0E442"
 BLACK = "#000000"
 PALETTE = (BLUE, ORANGE, GREEN, VERMILION, PURPLE, SKY, YELLOW, BLACK)
-EVENT_COLORS = (VERMILION, GREEN, PURPLE, BLACK)
+EVENT_COLORS = (VERMILION, GREEN, PURPLE, BLACK, SKY)
 BACKGROUND = "#ffffff"
 TEXT = "#222222"
+AXIS_GREY = "#555555"
 GRID = "#e5e5e5"
 ZERO_LINE = "#888888"
+ERROR_COLOR = "#333333"
+ERROR_WIDTH = 1.2
 SHADE = "#d9d9d9"
 RISK_OFF_COLOR = ORANGE
 RISK_ON_COLOR = BLUE
 
+STYLE = {
+    "font.size": 12,
+    "axes.titlesize": 13,
+    "axes.titleweight": "bold",
+    "axes.titlelocation": "left",
+    "axes.labelsize": 12,
+    "xtick.labelsize": 11,
+    "ytick.labelsize": 11,
+    "legend.fontsize": 11,
+    "legend.frameon": False,
+    "figure.titlesize": 15,
+    "figure.titleweight": "bold",
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.edgecolor": AXIS_GREY,
+    "axes.labelcolor": TEXT,
+    "xtick.color": AXIS_GREY,
+    "ytick.color": AXIS_GREY,
+    "text.color": TEXT,
+    "axes.grid": True,
+    "axes.grid.axis": "y",
+    "grid.color": GRID,
+    "grid.linewidth": 0.8,
+    "axes.axisbelow": True,
+    "figure.facecolor": BACKGROUND,
+    "axes.facecolor": BACKGROUND,
+    "savefig.facecolor": BACKGROUND,
+    "errorbar.capsize": 4,
+    "lines.linewidth": 2.0,
+}
+
 CI_LABEL = "95% block-bootstrap CI over days"
-SE_LABEL = "error bars: +/-1.96 standard errors over fills"
+MEAN_CI_LABEL = f"mean, {CI_LABEL}"
+FIT_LABEL = "fitted a*exp(-k*distance)"
+HOLLOW_LABEL = "hollow: too few hits, not fitted"
 PNL_LABEL = "mean daily PnL (USD)"
 HOURLY_PNL_LABEL = "mean hourly PnL (USD)"
 LATENCY_LABEL = "order latency (ms), data latency is half"
@@ -47,14 +91,11 @@ VIOLENT_LABEL = "most violent hour"
 LINE_WIDTH = 1.8
 MARKER_SIZE = 5
 TOTAL_MARKER_SIZE = 7
-CAPSIZE = 3
 ZERO_WIDTH = 0.8
-ROTATION = 30
 BAR_WIDTH = 0.38
 HALF_BAR = BAR_WIDTH / 2
 STACK_WIDTH = 0.6
 BEFORE_FEES_ALPHA = 0.45
-BEFORE_FEES_HATCH = "//"
 BAND_ALPHA = 0.2
 SCATTER_SIZE = 12
 CURVE_WIDTH = 1.0
@@ -84,38 +125,58 @@ STRATEGY_COMPONENTS = (
 REGIMES = (("low", -HALF_BAR, SKY), ("high", HALF_BAR, VERMILION))
 
 
-def _style(ax: Axes) -> None:
-    """Light theme: white background, dark grey text, and a light grid drawn behind the data."""
-    ax.set_facecolor(BACKGROUND)
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.spines[["left", "bottom"]].set_color(TEXT)
-    ax.tick_params(colors=TEXT)
-    ax.title.set_color(TEXT)
-    ax.xaxis.label.set_color(TEXT)
-    ax.yaxis.label.set_color(TEXT)
-    ax.grid(True, color=GRID)
-    ax.set_axisbelow(True)
+def styled() -> AbstractContextManager:
+    """The light theme and font sizes of ``STYLE``, for every figure drawn and saved inside its
+    ``with`` block. Matplotlib reads rcParams when it creates artists and when it saves, so both
+    the drawing and the saving must happen inside the block.
+    """
+    return matplotlib.rc_context(STYLE)
 
 
 def _legend(ax: Axes) -> None:
-    """Add a legend in the light theme, but only when the axes has a labelled artist."""
+    """A legend on one axes, only when it has a labelled artist. Used where panels differ."""
     if ax.get_legend_handles_labels()[0]:
-        ax.legend(fontsize=LEGEND_FONTSIZE, labelcolor=TEXT, facecolor=BACKGROUND, edgecolor=GRID)
+        ax.legend()
+
+
+def _shared_legend(fig: Figure, axes: np.ndarray, columns: int = MAX_LEGEND_COLUMNS) -> None:
+    """One legend under the whole figure, gathering the labelled artists of every panel. Panels
+    that show the same kinds of series repeat their labels, so each label is kept once, from the
+    first panel that has it.
+    """
+    entries: dict[str, Artist] = {}
+    for ax in axes.flat:
+        handles, labels = ax.get_legend_handles_labels()
+        for handle, label in zip(handles, labels, strict=True):
+            entries.setdefault(label, handle)
+    if entries:
+        fig.legend(
+            list(entries.values()),
+            list(entries),
+            loc="outside lower center",
+            ncols=min(len(entries), columns),
+            frameon=False,
+        )
+
+
+def _figure_title(fig: Figure, text: str) -> None:
+    """A short figure title, left-aligned at the figure's left edge so it reads first."""
+    fig.suptitle(text, x=TITLE_X, ha="left")
+
+
+def _usd_axis(ax: Axes) -> None:
+    """Thousands separators on a y axis in USD, so 12000 reads as 12,000."""
+    ax.yaxis.set_major_formatter(StrMethodFormatter("{x:,g}"))
 
 
 def _figure(columns: int) -> tuple[Figure, np.ndarray]:
-    """A light figure with one row of styled panels, read as ``axes[0][i]``."""
-    fig = Figure(
-        figsize=(PANEL_WIDTH * columns, PANEL_HEIGHT), layout="constrained", facecolor=BACKGROUND
-    )
-    axes = fig.subplots(1, columns, squeeze=False)
-    for ax in axes[0]:
-        _style(ax)
-    return fig, axes
+    """A row of panels read as ``axes[0][i]``. The theme comes from ``styled()``."""
+    fig = Figure(figsize=(PANEL_WIDTH * columns, PANEL_HEIGHT), layout="constrained")
+    return fig, fig.subplots(1, columns, squeeze=False)
 
 
 def _symbol_figure(symbols: list[str]) -> tuple[Figure, np.ndarray]:
-    """A light figure with one panel per symbol, each titled with its symbol."""
+    """A figure with one panel per symbol, each titled with its symbol."""
     fig, axes = _figure(len(symbols))
     for i, symbol in enumerate(symbols):
         axes[0][i].set_title(symbol)
@@ -159,12 +220,20 @@ def _yerr(mean: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
 
 
 def _ci_band(
-    ax: Axes, x: np.ndarray, mean: np.ndarray, lo: np.ndarray, hi: np.ndarray, color: str
+    ax: Axes,
+    x: np.ndarray,
+    mean: np.ndarray,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    color: str,
+    label: str,
 ) -> None:
-    """Translucent CI band. A NaN bound is replaced by the mean, so the band collapses there."""
+    """Translucent CI band with its legend label. A NaN bound is replaced by the mean, so the band
+    collapses there.
+    """
     band_lo = np.where(np.isnan(lo), mean, lo)
     band_hi = np.where(np.isnan(hi), mean, hi)
-    ax.fill_between(x, band_lo, band_hi, color=color, alpha=BAND_ALPHA, linewidth=0)
+    ax.fill_between(x, band_lo, band_hi, color=color, alpha=BAND_ALPHA, linewidth=0, label=label)
 
 
 def _line(ax: Axes, x: np.ndarray, y: np.ndarray, color: str, label: str) -> None:
@@ -182,8 +251,11 @@ def _numeric_ticks(ax: Axes, values: np.ndarray) -> None:
 
 
 def _category_ticks(ax: Axes, names: list[str]) -> None:
-    """One tick per variant, with rotated labels so long variant names do not overlap."""
-    ax.set_xticks(np.arange(len(names)), labels=names, rotation=ROTATION, ha="right")
+    """One tick per variant with horizontal labels. Underscores become line breaks, so a long name
+    such as ``queue_latency_stress`` stacks onto several lines instead of running into its
+    neighbours.
+    """
+    ax.set_xticks(np.arange(len(names)), labels=[name.replace("_", "\n") for name in names])
 
 
 def _by_variant(rows: pl.DataFrame, variants: list[str], regime: str, column: str) -> np.ndarray:
@@ -214,12 +286,18 @@ def _hours_since(times: np.ndarray | int, start: int) -> np.ndarray:
     return (np.asarray(times) - start) / NS_PER_HOUR
 
 
-def _draw_risk_events(ax: Axes, events: pl.DataFrame, start: int) -> None:
+def _event_colors(frames: list[pl.DataFrame]) -> dict[str, str]:
+    """One colour per risk event kind across all the panels, so a kind has the same colour in
+    every panel and the shared legend matches each of them.
+    """
+    kinds = dict.fromkeys(kind for frame in frames for kind in frame["kind"].to_list())
+    return {kind: EVENT_COLORS[i % len(EVENT_COLORS)] for i, kind in enumerate(kinds)}
+
+
+def _draw_risk_events(ax: Axes, events: pl.DataFrame, start: int, colors: dict[str, str]) -> None:
     """A dashed vertical line at each risk event, coloured by kind. Each kind gets one legend
     entry, so a long run with hundreds of events keeps a short legend.
     """
-    kinds = events["kind"].unique(maintain_order=True).to_list()
-    colors = {kind: EVENT_COLORS[i % len(EVENT_COLORS)] for i, kind in enumerate(kinds)}
     labelled: set[str] = set()
     hours = _hours_since(events["ts"].to_numpy(), start)
     for hour, kind in zip(hours, events["kind"].to_list(), strict=True):
@@ -247,26 +325,29 @@ def e1_realism_ladder(table: pl.DataFrame, path: Path) -> Path:
         x = np.arange(len(variants))
         mean = _array(rows, "pnl_mean")
         yerr = _yerr(mean, _array(rows, "pnl_lo"), _array(rows, "pnl_hi"))
-        ax.bar(x - HALF_BAR, mean, BAR_WIDTH, yerr=yerr, capsize=CAPSIZE, color=BLUE, label="PnL")
+        ax.bar(
+            x - HALF_BAR,
+            mean,
+            BAR_WIDTH,
+            yerr=yerr,
+            error_kw={"ecolor": ERROR_COLOR, "elinewidth": ERROR_WIDTH},
+            color=BLUE,
+            label=f"PnL: {MEAN_CI_LABEL}",
+        )
         ax.bar(
             x + HALF_BAR,
             _array(rows, "pnl_before_fees"),
             BAR_WIDTH,
             color=BLUE,
             alpha=BEFORE_FEES_ALPHA,
-            hatch=BEFORE_FEES_HATCH,
-            edgecolor=BLUE,
             label="PnL before maker fees",
         )
         ax.axhline(0, color=ZERO_LINE, linewidth=ZERO_WIDTH)
         _category_ticks(ax, variants)
         ax.set_ylabel(PNL_LABEL)
-        _legend(ax)
-    fig.suptitle(
-        f"E1 realism ladder: mean daily PnL (USD), {CI_LABEL}",
-        color=TEXT,
-        wrap=True,
-    )
+        _usd_axis(ax)
+    _figure_title(fig, "E1 realism ladder: mean daily PnL by fill model (USD)")
+    _shared_legend(fig, axes)
     return _save(fig, path)
 
 
@@ -291,19 +372,17 @@ def e2_strategies(table: pl.DataFrame, path: Path) -> Path:
             yerr=yerr,
             fmt="D",
             color=BLACK,
-            capsize=CAPSIZE,
+            ecolor=ERROR_COLOR,
+            elinewidth=ERROR_WIDTH,
             markersize=TOTAL_MARKER_SIZE,
-            label="total PnL",
+            label=f"total PnL: {MEAN_CI_LABEL}",
         )
         ax.axhline(0, color=ZERO_LINE, linewidth=ZERO_WIDTH)
         _category_ticks(ax, variants)
         ax.set_ylabel(PNL_LABEL)
-        _legend(ax)
-    fig.suptitle(
-        f"E2 strategy attribution: mean daily PnL (USD) by component, {CI_LABEL}",
-        color=TEXT,
-        wrap=True,
-    )
+        _usd_axis(ax)
+    _figure_title(fig, "E2 strategies: mean daily PnL by component (USD)")
+    _shared_legend(fig, axes, STRATEGY_LEGEND_COLUMNS)
     return _save(fig, path)
 
 
@@ -323,17 +402,16 @@ def e3_sensitivity(table: pl.DataFrame, path: Path) -> Path:
             sub = _for_symbol(rows, symbol).sort("value")
             x = _array(sub, "value")
             mean = _array(sub, "pnl_mean")
-            _ci_band(ax, x, mean, _array(sub, "pnl_lo"), _array(sub, "pnl_hi"), _color(j))
+            _ci_band(
+                ax, x, mean, _array(sub, "pnl_lo"), _array(sub, "pnl_hi"), _color(j), MEAN_CI_LABEL
+            )
             _line(ax, x, mean, _color(j), symbol)
         _numeric_ticks(ax, _array(rows, "value"))
         ax.set_xlabel(parameter)
         ax.set_ylabel(PNL_LABEL)
-        _legend(ax)
-    fig.suptitle(
-        f"E3 parameter sensitivity: mean daily PnL (USD) by setting, {CI_LABEL}",
-        color=TEXT,
-        wrap=True,
-    )
+        _usd_axis(ax)
+    _figure_title(fig, "E3 sensitivity: mean daily PnL by setting (USD)")
+    _shared_legend(fig, axes)
     return _save(fig, path)
 
 
@@ -355,24 +433,21 @@ def e4_latency(table: pl.DataFrame, path: Path) -> Path:
         x = _array(sub, "latency_ms")
         mean = _array(sub, "pnl_mean")
         _ci_band(
-            ax=pnl_ax,
-            x=x,
-            mean=mean,
-            lo=_array(sub, "pnl_lo"),
-            hi=_array(sub, "pnl_hi"),
-            color=_color(j),
+            pnl_ax,
+            x,
+            mean,
+            _array(sub, "pnl_lo"),
+            _array(sub, "pnl_hi"),
+            _color(j),
+            MEAN_CI_LABEL,
         )
         _line(pnl_ax, x, mean, _color(j), symbol)
         _line(adverse_ax, x, _array(sub, "adverse_bps_5s"), _color(j), symbol)
     pnl_ax.set_ylabel(PNL_LABEL)
+    _usd_axis(pnl_ax)
     adverse_ax.set_ylabel(ADVERSE_LABEL)
-    for ax in (pnl_ax, adverse_ax):
-        _legend(ax)
-    fig.suptitle(
-        f"E4 order latency: mean daily PnL (USD, {CI_LABEL}) and adverse move at 5 s (bps)",
-        color=TEXT,
-        wrap=True,
-    )
+    _figure_title(fig, "E4 latency: PnL and adverse move against order latency")
+    _shared_legend(fig, axes)
     return _save(fig, path)
 
 
@@ -399,19 +474,16 @@ def e5_regimes(table: pl.DataFrame, path: Path) -> Path:
                 mean,
                 BAR_WIDTH,
                 yerr=yerr,
-                capsize=CAPSIZE,
+                error_kw={"ecolor": ERROR_COLOR, "elinewidth": ERROR_WIDTH},
                 color=color,
-                label=f"{regime} volatility",
+                label=f"{regime} volatility: {MEAN_CI_LABEL}",
             )
         ax.axhline(0, color=ZERO_LINE, linewidth=ZERO_WIDTH)
         _category_ticks(ax, variants)
         ax.set_ylabel(HOURLY_PNL_LABEL)
-        _legend(ax)
-    fig.suptitle(
-        f"E5 volatility regimes: mean hourly PnL (USD) by regime, {CI_LABEL}",
-        color=TEXT,
-        wrap=True,
-    )
+        _usd_axis(ax)
+    _figure_title(fig, "E5 volatility regimes: mean hourly PnL (USD)")
+    _shared_legend(fig, axes)
     return _save(fig, path)
 
 
@@ -423,6 +495,8 @@ def e6_event_study(
     layer cut losses during the stress hour and which controls fired when.
     """
     symbols = _symbols(windows)
+    risk_events = {symbol: series[(symbol, "risk_on")]["risk_events"] for symbol in symbols}
+    colors = _event_colors(list(risk_events.values()))
     fig, axes = _symbol_figure(symbols)
     for i, symbol in enumerate(symbols):
         ax = axes[0][i]
@@ -445,15 +519,12 @@ def e6_event_study(
             alpha=SHADE_ALPHA,
             label=VIOLENT_LABEL,
         )
-        _draw_risk_events(ax, series[(symbol, "risk_on")]["risk_events"], start)
+        _draw_risk_events(ax, risk_events[symbol], start, colors)
         ax.set_xlabel("hours since window start")
         ax.set_ylabel("equity (USD)")
-        _legend(ax)
-    fig.suptitle(
-        "E6 event study: equity (USD) through the replayed window, risk controls off vs on",
-        color=TEXT,
-        wrap=True,
-    )
+        _usd_axis(ax)
+    _figure_title(fig, "E6 event study: equity with risk controls off and on (USD)")
+    _shared_legend(fig, axes)
     return _save(fig, path)
 
 
@@ -469,7 +540,15 @@ def e7_fee_tiers(fee_table: pl.DataFrame, rerun_check: pl.DataFrame, path: Path)
         formula = _for_symbol(fee_table, symbol).sort("maker_bps")
         x = _array(formula, "maker_bps")
         mean = _array(formula, "pnl_mean")
-        _ci_band(ax, x, mean, _array(formula, "pnl_lo"), _array(formula, "pnl_hi"), BLUE)
+        _ci_band(
+            ax,
+            x,
+            mean,
+            _array(formula, "pnl_lo"),
+            _array(formula, "pnl_hi"),
+            BLUE,
+            MEAN_CI_LABEL,
+        )
         _line(ax, x, mean, BLUE, "formula from baseline volume")
         reruns = (
             _for_symbol(rerun_check, symbol)
@@ -491,13 +570,9 @@ def e7_fee_tiers(fee_table: pl.DataFrame, rerun_check: pl.DataFrame, path: Path)
         _numeric_ticks(ax, x)
         ax.set_xlabel(FEE_LABEL)
         ax.set_ylabel(PNL_LABEL)
-        _legend(ax)
-    fig.suptitle(
-        f"E7 maker fee tiers: mean daily PnL (USD) by maker fee, {CI_LABEL}; "
-        "hollow circles are real reruns",
-        color=TEXT,
-        wrap=True,
-    )
+        _usd_axis(ax)
+    _figure_title(fig, "E7 maker fee tiers: mean daily PnL by maker fee (USD)")
+    _shared_legend(fig, axes)
     return _save(fig, path)
 
 
@@ -522,10 +597,11 @@ def markouts(table: pl.DataFrame, path: Path) -> Path:
                 yerr=SE_Z * se,
                 fmt="o-",
                 color=color,
-                capsize=CAPSIZE,
+                ecolor=ERROR_COLOR,
+                elinewidth=ERROR_WIDTH,
                 linewidth=LINE_WIDTH,
                 markersize=MARKER_SIZE,
-                label=f"{name}: markout",
+                label=f"{name}: markout, ±{SE_Z:g} SE",
             )
             ax.plot(
                 x,
@@ -540,12 +616,8 @@ def markouts(table: pl.DataFrame, path: Path) -> Path:
         ax.axhline(0, color=ZERO_LINE, linewidth=ZERO_WIDTH)
         ax.set_xlabel("horizon (s)")
         ax.set_ylabel("bps")
-        _legend(ax)
-    fig.suptitle(
-        f"Baseline quote markouts: mean markout and adverse mid move (bps) by horizon, {SE_LABEL}",
-        color=TEXT,
-        wrap=True,
-    )
+    _figure_title(fig, "Markouts of the baseline quote fills (bps)")
+    _shared_legend(fig, axes, MARKOUT_LEGEND_COLUMNS)
     return _save(fig, path)
 
 
@@ -586,18 +658,14 @@ def intensity_fit(levels: pl.DataFrame, path: Path) -> Path:
                 day["a"].first() * np.exp(-day["k"].first() * grid),
                 color=color,
                 linewidth=CURVE_WIDTH,
+                label=FIT_LABEL,
             )
         ax.set_yscale("log")
         ax.set_xlabel("distance from mid (USD)")
         ax.set_ylabel("aggressive orders per second")
-        _legend(ax)
-    fig.suptitle(
-        "Intensity calibration: aggressive orders per second reaching each distance from mid "
-        "(USD), points per day with fitted a*exp(-k*distance) lines; hollow points had too few "
-        "hits to enter the fit",
-        color=TEXT,
-        wrap=True,
-    )
+    axes[0][0].scatter([], [], facecolors="none", edgecolors=TEXT, label=HOLLOW_LABEL)
+    _figure_title(fig, "Fill-intensity calibration: hits per second by distance from mid")
+    _shared_legend(fig, axes, CALIBRATION_LEGEND_COLUMNS)
     return _save(fig, path)
 
 
@@ -631,6 +699,7 @@ def paper_comparison(
     equity.axhline(0, color=ZERO_LINE, linewidth=ZERO_WIDTH)
     equity.set_xlabel(MINUTES_LABEL)
     equity.set_ylabel("equity (USD)")
+    _usd_axis(equity)
     equity.set_title("Paper session vs replay")
     _legend(equity)
     shown = lateness_ms[lateness_ms <= np.quantile(lateness_ms, LATENCY_SHOWN_QUANTILE)]
@@ -644,6 +713,7 @@ def paper_comparison(
     )
     lateness.set_xlabel("receive time minus exchange time (ms)")
     lateness.set_ylabel("messages")
+    lateness.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
     lateness.set_title("Feed delay, fastest 99% of messages")
     _legend(lateness)
     return _save(fig, path)

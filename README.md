@@ -1,74 +1,253 @@
+<div align="center">
+
 # QuoteLab
+
+**An event-driven market-making simulator on public Binance futures data.**<br>
+How do textbook quoting models hold up once fees, latency and queue position are simulated honestly?
+
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
+[![Data: public files only](https://img.shields.io/badge/data-public%20files%20only-0072B2)](#data)
+[![Simulation only](https://img.shields.io/badge/simulation%20only-no%20real%20orders-6e7781)](#limitations)
 
 **English** · [فارسی](README.fa.md)
 
-An event-driven market-making simulator in Python, built on public Binance USD-M futures data
-(top of book and trade prints for BTCUSDT and ETHUSDT) and a seeded synthetic order-flow
-generator. It is a simulation for studying quoting models, fill realism and risk controls. It is
-not a trading system, it never places an order, and it makes no claim of profitability.
+<img src="reports/real/figures/replay.gif" width="100%" alt="Replay of the busiest minute of a Binance test day: market quotes with our fills, our position and our PnL">
 
-![Replay of the busiest minute of a Binance test day: market quotes and our fills, position and PnL](reports/real/figures/replay.gif)
+<sub>One backtest replayed: the busiest minute of a BTCUSDT test day. Top: the market's best bid and ask with our fills. Middle: our position. Bottom: PnL since the window opened.</sub>
 
-A replay drawn from the files of one backtest run on Binance data: the market's best bid and ask
-(sampled once a second) with our fills on top, our position in the middle and the PnL since the
-window opened at the bottom.
+</div>
 
-## Problem
+> [!IMPORTANT]
+> QuoteLab is a research simulation. It reads public market data only, needs no API keys or
+> account, never places an order, and makes no claim of profitability.
+
+**Contents:** [Problem](#the-problem) · [Key results](#key-results) · [What's inside](#whats-inside) · [Quick start](#quick-start) · [Architecture](#architecture) · [Experiments](#experiments) · [Paper trading](#live-paper-trading) · [Feature map](#feature-map) · [Limitations](#limitations)
+
+## The problem
 
 A market maker quotes a bid and an ask, earns the spread when both sides fill, and loses when
 the price moves against the inventory it is left holding. Whether a quoting model "works"
 depends less on the model than on how fills are simulated: a backtest that fills every order
-touched by the price, ignores the queue ahead of you and ignores latency can turn a losing
-strategy into a winning one. QuoteLab asks how textbook quoting models behave on real public
-data once fees, latency and an estimated queue position are included, and how much each layer
-of realism changes the answer.
+the price touches, ignores the queue ahead of you and ignores latency can turn a losing strategy
+into a winning one.
 
-## Approach
+QuoteLab replays Binance BTCUSDT and ETHUSDT data through one event loop and measures how much
+each layer of realism (fees, latency, an estimated queue position) changes the answer.
 
-- **Data.** Public daily files from `data.binance.vision` (best bid/offer, individual trades,
-  1-minute klines, funding), checksum-verified and converted to Parquet. A seeded synthetic
-  generator with the same schema makes every figure reproducible without a download.
-- **One event loop.** A single clock replays book and trade events in time order. The trader
-  sees data after a data latency; its orders and cancels reach the simulated exchange after
-  their own latencies. Nothing can read an event before its timestamp.
-- **Models.** Fair value is the microprice with an optional order-flow-imbalance term. Quotes
-  come from a fixed spread, an inventory skew, Avellaneda-Stoikov, or the GLFT closed form.
-  Volatility and the fill intensity `A·exp(−k·δ)` are calibrated on the previous day only
-  (walk-forward).
-- **Fills.** Three fill models (optimistic, trade-through, queue-aware) so the effect of fill
-  realism is measured rather than assumed.
-- **Risk.** Hard inventory bound, latched kill switches (inventory, drawdown, stale data),
-  temporary circuit breakers (data gap, spread, volatility spike, order-flow toxicity), a staged
-  size ramp, and an optional taker hedge.
-- **Analysis.** Every run reconciles a PnL attribution (spread, inventory, fees, hedging,
-  funding) to the engine's final equity, computes markouts at 1, 5, 30 and 60 seconds in
-  DuckDB, and reports means with day-level bootstrap intervals.
-- **Experiments.** E1 realism ladder, E2 strategy comparison, E3 parameter sensitivity, E4
-  latency sweep, E5 volatility regimes, E6 event study of the most violent hour with risk
-  controls off and on, E7 maker-fee tiers and the break-even fee.
-- **Live paper mode.** The same strategy and engine run on Binance's public, read-only
-  websocket, with fills simulated locally. The recorded session is then replayed through the
-  backtest to measure the live-versus-backtest gap.
+## Key results
+
+The baseline is GLFT quoting with queue-aware fills and latency, on public Binance USD-M data.
+Every number below is written by `make report` from the files a run produced; none is typed by
+hand. All of it is simulation.
+
+<!-- quotelab:results:real:start -->
+<sub>196 backtests over 4 test days, 6.0 billion market events replayed.</sub>
+
+| Symbol | Mean daily PnL | Spread | Inventory | Fees | Break-even maker fee |
+|---|--:|--:|--:|--:|--:|
+| `BTCUSDT` | -$1,146.23 | $62.66 | -$387.33 | -$821.58 | -0.79 bps |
+| `ETHUSDT` | -$220.87 | $16.59 | -$80.40 | -$157.05 | -0.81 bps |
+
+- **Fill realism.** Mean daily PnL from `optimistic` fills to queue-aware fills with latency (`queue_latency`): `BTCUSDT` -$907.62 → -$1,146.23; `ETHUSDT` -$176.13 → -$220.87.
+- **Fees.** The baseline breaks even only with a maker rebate: `BTCUSDT` -0.79 bps, `ETHUSDT` -0.81 bps.
+
+**E1 · Realism ladder.** The baseline's daily PnL as the fill model gets more realistic, rung by rung, beside the same PnL before maker fees.
+
+![E1 · Realism ladder](reports/real/figures/e1_realism_ladder.png)
+
+**E2 · Strategy comparison.** Each quoting model's daily PnL split into spread, inventory, fees, hedging and funding; the diamond is the total.
+
+![E2 · Strategy comparison](reports/real/figures/e2_strategies.png)
+
+**E7 · Fee tiers.** The baseline's daily PnL at each maker fee; the break-even fee is where it crosses zero.
+
+![E7 · Fee tiers](reports/real/figures/e7_fee_tiers.png)
+
+<details>
+<summary>The E1 realism ladder as a table</summary>
+
+**E1 realism ladder (USD per day)**
+
+| Rung | Symbol | Mean daily PnL [95% CI] | Change vs previous rung |
+|---|---|---|---|
+| optimistic | BTCUSDT | -907.62 [-1,007.89, -761.22] | n/a |
+| trade_through | BTCUSDT | -694.11 [-779.29, -580.08] | 213.51 |
+| queue | BTCUSDT | -838.43 [-936.37, -704.16] | -144.32 |
+| queue_latency | BTCUSDT | -1,146.23 [-1,268.42, -1,003.59] | -307.80 |
+| queue_latency_stress | BTCUSDT | -1,113.77 [-1,240.42, -975.05] | 32.46 |
+| optimistic | ETHUSDT | -176.13 [-193.26, -159.00] | n/a |
+| trade_through | ETHUSDT | -135.80 [-149.32, -122.28] | 40.33 |
+| queue | ETHUSDT | -159.13 [-176.23, -142.03] | -23.33 |
+| queue_latency | ETHUSDT | -220.87 [-235.94, -208.18] | -61.74 |
+| queue_latency_stress | ETHUSDT | -217.80 [-232.46, -204.62] | 3.07 |
+
+</details>
+
+Every table and figure: [reports/real/RESULTS.md](reports/real/RESULTS.md). The same report as one HTML page to open locally: `reports/real/dashboard.html`.
+<!-- quotelab:results:real:end -->
+
+<details>
+<summary><b>The same experiments on synthetic data</b>, reproducible without any download</summary>
+
+<!-- quotelab:results:synthetic:start -->
+<sub>98 backtests over 4 test days, 4.0 million market events replayed.</sub>
+
+| Symbol | Mean daily PnL | Spread | Inventory | Fees | Break-even maker fee |
+|---|--:|--:|--:|--:|--:|
+| `SYNTHUSDT` | -$80.70 | $0.69 | -$1.14 | -$80.26 | -0.01 bps |
+
+- **Fill realism.** Mean daily PnL from `optimistic` fills to queue-aware fills with latency (`queue_latency`): `SYNTHUSDT` -$289.49 → -$80.70.
+- **Fees.** The baseline breaks even only with a maker rebate: `SYNTHUSDT` -0.01 bps.
+
+**E1 · Realism ladder.** The baseline's daily PnL as the fill model gets more realistic, rung by rung, beside the same PnL before maker fees.
+
+![E1 · Realism ladder](reports/synthetic/figures/e1_realism_ladder.png)
+
+**E2 · Strategy comparison.** Each quoting model's daily PnL split into spread, inventory, fees, hedging and funding; the diamond is the total.
+
+![E2 · Strategy comparison](reports/synthetic/figures/e2_strategies.png)
+
+**E7 · Fee tiers.** The baseline's daily PnL at each maker fee; the break-even fee is where it crosses zero.
+
+![E7 · Fee tiers](reports/synthetic/figures/e7_fee_tiers.png)
+
+<details>
+<summary>The E1 realism ladder as a table</summary>
+
+**E1 realism ladder (USD per day)**
+
+| Rung | Symbol | Mean daily PnL [95% CI] | Change vs previous rung |
+|---|---|---|---|
+| optimistic | SYNTHUSDT | -289.49 [-294.52, -282.39] | n/a |
+| trade_through | SYNTHUSDT | -34.52 [-36.52, -32.52] | 254.97 |
+| queue | SYNTHUSDT | -78.62 [-80.33, -76.92] | -44.10 |
+| queue_latency | SYNTHUSDT | -80.70 [-83.49, -77.91] | -2.08 |
+| queue_latency_stress | SYNTHUSDT | -74.26 [-75.30, -73.27] | 6.44 |
+
+</details>
+
+Every table and figure: [reports/synthetic/RESULTS.md](reports/synthetic/RESULTS.md). The same report as one HTML page to open locally: `reports/synthetic/dashboard.html`.
+<!-- quotelab:results:synthetic:end -->
+
+</details>
+
+`make report` also writes each report as a single HTML page:
+
+<img src="docs/images/dashboard.png" width="100%" alt="The report dashboard for the Binance data, on the E7 fee tiers tab">
+
+## What's inside
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+**Event-driven engine**<br>
+One clock replays book and trade events in time order. The trader sees data after a data
+latency; its orders and cancels reach the simulated exchange after their own latencies.
+
+</td>
+<td width="50%" valign="top">
+
+**Three fill models**<br>
+Optimistic, trade-through and queue-aware with an estimated queue position, so the effect of
+fill realism is measured rather than assumed.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Quoting models**<br>
+Fixed spread, inventory skew, Avellaneda-Stoikov and GLFT, around a microprice fair value with
+an order-flow-imbalance term.
+
+</td>
+<td valign="top">
+
+**Walk-forward calibration**<br>
+Volatility and the fill intensity `A·exp(−k·δ)` are fitted on the previous day only, so no test
+day sees its own data.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Risk layer**<br>
+A hard inventory bound, latched kill switches, temporary circuit breakers, a staged size ramp
+and an optional taker hedge.
+
+</td>
+<td valign="top">
+
+**Analytics**<br>
+PnL attribution reconciled to final equity on every run, markouts at 1 to 60 seconds in DuckDB,
+and day-level bootstrap intervals.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Live paper mode**<br>
+The same engine on Binance's public, read-only websocket, then a replay of the recorded session
+to measure the live-versus-backtest gap.
+
+</td>
+<td valign="top">
+
+**Generated reports**<br>
+Figures, `RESULTS.md`, an HTML dashboard and the numbers in this README, all written from run
+files.
+
+</td>
+</tr>
+</table>
+
+## Quick start
+
+Needs [uv](https://docs.astral.sh/uv/) and Python 3.11 or later. Three commands rebuild every
+synthetic result and figure from a clean clone:
+
+```bash
+make install
+make backtest
+make report
+```
+
+| Command | What it does |
+|---|---|
+| `make install` | Create the environment from the lockfile |
+| `make backtest` | Write the seeded synthetic dataset and run experiments E1 to E7 |
+| `make report` | Write `reports/synthetic/` and refresh the synthetic block of this README |
+| `make real` | The same on Binance data: download, verify, convert, backtest and report |
+| `make paper` | A live paper session on the public feed, then its replay |
+| `make test` | The test suite |
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    A["data.binance.vision public files"] --> C["Parquet: book, trades, klines, funding"]
+    A["data.binance.vision<br/>public daily files"] --> C[("Parquet<br/>book, trades, klines, funding")]
     B["Seeded synthetic generator"] --> C
-    C --> D["Loader: one time-ordered event stream"]
+    C --> D["Loader<br/>one time-ordered event stream"]
+    D --> X
+    subgraph loop ["Backtest event loop, one clock"]
+        X["SimExchange<br/>book, resting orders, fill model"]
+        T["Trader<br/>strategy, risk manager, order manager"]
+        X -- "data latency" --> T
+        T -- "order and cancel latency" --> X
+    end
     K["Calibration on the previous day"] --> T
-    D --> X["SimExchange: book, resting orders, fill model"]
-    X -- "data latency" --> T["Trader: strategy, risk manager, order manager"]
-    T -- "order and cancel latency" --> X
-    X --> R["Recorder: fills, 1 s timeseries, risk events"]
-    R --> E["Experiments E1 to E7"]
-    E --> N["Analytics: attribution, markouts, bootstrap"]
-    N --> P["Report: figures, RESULTS.md, dashboard, this README"]
-    W["Binance public websocket, read-only"] --> T
+    W["Binance public websocket<br/>read-only, paper mode"] --> T
+    X --> R[("Run files<br/>fills, 1 s timeseries, risk events")]
+    R --> N["Analytics<br/>attribution, markouts, bootstrap"]
+    N --> P["Report<br/>figures, RESULTS.md, dashboard, README"]
 ```
 
-The same flow with module names:
+<details>
+<summary>The same flow with module names</summary>
 
 ```text
  data.binance.vision (public files)             synthetic generator (seeded)
@@ -103,108 +282,53 @@ The same flow with module names:
         ──▶ paper-compare: replay the recorded feed, compare fills, PnL and risk events
 ```
 
-## How to run
+</details>
 
-Requires [uv](https://docs.astral.sh/uv/) and Python 3.11 or later. Three commands rebuild every
-synthetic result and figure from a clean clone:
+Nothing can read an event before its timestamp: the trader only sees what has arrived after its
+data latency, and the exchange only sees orders after their own latency.
+[docs/DESIGN.md](docs/DESIGN.md) explains how look-ahead is prevented and how fills are modelled.
 
-```bash
-make install
-make backtest
-make report
-```
+## Experiments
 
-`make backtest` writes the synthetic dataset and runs E1 to E7; `make report` writes
-`reports/synthetic/` and refreshes the synthetic block below. One extra command does the same
-on Binance data (download, convert, backtest and report):
+| | Question | What varies |
+|---|---|---|
+| **E1** | How much does fill realism change the PnL? | Fill model and latency, five rungs |
+| **E2** | Which quoting model does best, and where does its PnL come from? | Strategy |
+| **E3** | How sensitive is the baseline to its settings? | Skew, order size, inventory bound |
+| **E4** | What does latency cost? | Order latency |
+| **E5** | Which strategies suffer when volatility rises? | Low- and high-volatility hours |
+| **E6** | Do the risk controls help in the most violent hour? | Risk controls off and on |
+| **E7** | At what maker fee would the baseline break even? | Maker fee |
 
-```bash
-make real
-```
+Each experiment's tables, figures and a plain-language reading are in
+[reports/real/RESULTS.md](reports/real/RESULTS.md).
 
-`make test` runs the test suite. `make paper` runs a live paper session on the public feed
-(15 minutes of warm-up, then 60 minutes) and compares it with its replay.
+## Live paper trading
 
-## Results
-
-Every number in this section is written by the report code from files a run produced. Nothing
-here is typed by hand. All of it is simulation: none of it is evidence that a strategy would
-make money live.
-
-<!-- quotelab:results:synthetic:start -->
-### QuoteLab results: synthetic data
-
-- `SYNTHUSDT`, baseline `glft` over 4 test days: mean daily PnL -$80.70, of which spread $0.69, inventory -$1.14 and fees -$80.26. Break-even maker fee -0.011 bps.
-
-**E1 realism ladder (USD per day)**
-
-| Rung | Symbol | Mean daily PnL [95% CI] | Change vs previous rung |
-|---|---|---|---|
-| optimistic | SYNTHUSDT | -289.49 [-294.52, -282.39] | n/a |
-| trade_through | SYNTHUSDT | -34.52 [-36.52, -32.52] | 254.97 |
-| queue | SYNTHUSDT | -78.62 [-80.33, -76.92] | -44.10 |
-| queue_latency | SYNTHUSDT | -80.70 [-83.49, -77.91] | -2.08 |
-| queue_latency_stress | SYNTHUSDT | -74.26 [-75.30, -73.27] | 6.44 |
-
-![E1 · Realism ladder](reports/synthetic/figures/e1_realism_ladder.png)
-
-![E2 · Strategy comparison](reports/synthetic/figures/e2_strategies.png)
-
-![E7 · Fee tiers](reports/synthetic/figures/e7_fee_tiers.png)
-
-Full write-up with every table: [reports/synthetic/RESULTS.md](reports/synthetic/RESULTS.md). The same report as a page to open locally: `reports/synthetic/dashboard.html`.
-<!-- quotelab:results:synthetic:end -->
-
-<!-- quotelab:results:real:start -->
-### QuoteLab results: Binance data
-
-- `BTCUSDT`, baseline `glft` over 4 test days: mean daily PnL -$1,146.23, of which spread $62.66, inventory -$387.33 and fees -$821.58. Break-even maker fee -0.790 bps.
-- `ETHUSDT`, baseline `glft` over 4 test days: mean daily PnL -$220.87, of which spread $16.59, inventory -$80.40 and fees -$157.05. Break-even maker fee -0.813 bps.
-
-**E1 realism ladder (USD per day)**
-
-| Rung | Symbol | Mean daily PnL [95% CI] | Change vs previous rung |
-|---|---|---|---|
-| optimistic | BTCUSDT | -907.62 [-1,007.89, -761.22] | n/a |
-| trade_through | BTCUSDT | -694.11 [-779.29, -580.08] | 213.51 |
-| queue | BTCUSDT | -838.43 [-936.37, -704.16] | -144.32 |
-| queue_latency | BTCUSDT | -1,146.23 [-1,268.42, -1,003.59] | -307.80 |
-| queue_latency_stress | BTCUSDT | -1,113.77 [-1,240.42, -975.05] | 32.46 |
-| optimistic | ETHUSDT | -176.13 [-193.26, -159.00] | n/a |
-| trade_through | ETHUSDT | -135.80 [-149.32, -122.28] | 40.33 |
-| queue | ETHUSDT | -159.13 [-176.23, -142.03] | -23.33 |
-| queue_latency | ETHUSDT | -220.87 [-235.94, -208.18] | -61.74 |
-| queue_latency_stress | ETHUSDT | -217.80 [-232.46, -204.62] | 3.07 |
-
-![E1 · Realism ladder](reports/real/figures/e1_realism_ladder.png)
-
-![E2 · Strategy comparison](reports/real/figures/e2_strategies.png)
-
-![E7 · Fee tiers](reports/real/figures/e7_fee_tiers.png)
-
-Full write-up with every table: [reports/real/RESULTS.md](reports/real/RESULTS.md). The same report as a page to open locally: `reports/real/dashboard.html`.
-
-**Resume line:** Built QuoteLab, an event-driven market-making simulator in Python (asyncio, DuckDB, polars) with GLFT and Avellaneda-Stoikov quoting, a queue-aware fill model with latency, PnL attribution, markouts, kill switches and a read-only live paper-trading mode; ran 196 backtests over 4 test days of Binance BTCUSDT/ETHUSDT data (6.0 billion market events replayed in total) and found the baseline breaks even only with a maker rebate (break-even maker fee BTCUSDT -0.79 bps, ETHUSDT -0.81 bps).
-<!-- quotelab:results:real:end -->
+`make paper` runs the same strategy and engine on Binance's public, read-only websocket (15
+minutes of warm-up, then 60 minutes), simulating fills locally. The recorded feed is then
+replayed through the backtest and the two are compared fill by fill. The latest session:
 
 <!-- quotelab:results:paper:start -->
-### QuoteLab paper session
+`BTCUSDT`, live window 2026-10-12 09:38 to 2026-10-12 10:38 UTC.
 
-- `BTCUSDT`, live window 2026-10-12 09:38 to 2026-10-12 10:38 UTC: paper PnL -$21.31 with 360 quote fills, replay -$20.92 with 352. The first 14 fills match exactly; fill 15 differs: paper buy 0.003 at 83,397.40, 60.510 s into the window, replay buy 0.003 at 83,403.80, 60.009 s into the window.
-- Feed: 1,064,730 messages, 0 reconnects, 9.58% clamped, median delay -284.6 ms against the 5 ms the engine assumes.
+| | Paper (live feed) | Replay (backtest) |
+|---|--:|--:|
+| PnL | -$21.31 | -$20.92 |
+| Quote fills | 360 | 352 |
+
+- **Fills.** The first 14 fills match exactly; fill 15 differs: paper buy 0.003 at 83,397.40, 60.510 s into the window, replay buy 0.003 at 83,403.80, 60.009 s into the window.
+- **Feed.** 1,064,730 messages, 0 reconnects, 9.58% clamped to the engine clock, median delay -284.6 ms against the 5 ms the engine assumes.
 
 ![Paper session vs replay](reports/paper/20261012T0923Z/figures/paper_vs_replay.png)
 
 Full comparison: [reports/paper/20261012T0923Z/COMPARISON.md](reports/paper/20261012T0923Z/COMPARISON.md).
 <!-- quotelab:results:paper:end -->
 
-`make report` also writes each report as a single HTML page. The Binance one:
-
-![The report dashboard for the Binance data](docs/images/dashboard.png)
-
 ## Feature map
 
-How each part of QuoteLab maps to a market-making responsibility.
+<details>
+<summary>How each part of QuoteLab maps to a market-making responsibility</summary>
 
 | Responsibility | Where it lives |
 |---|---|
@@ -219,14 +343,16 @@ How each part of QuoteLab maps to a market-making responsibility.
 | Live-versus-backtest gaps | Read-only paper trading on the public websocket and a replay of the same session (`live/`) that reports where fills and PnL differ |
 | Production Python | asyncio websocket client with reconnect, backoff and a heartbeat watchdog; typed, small modules; pytest suite; ruff; uv lockfile; data and run outputs kept out of version control |
 
+</details>
+
 ## Documents
 
-- [docs/MODEL.md](docs/MODEL.md): every formula, with a notation table and a derivation sketch.
-- [docs/DESIGN.md](docs/DESIGN.md): why event-driven, how look-ahead is prevented, how fills are
-  modelled, and the known approximations.
-- [docs/INTERVIEW_NOTES.md](docs/INTERVIEW_NOTES.md): likely interview questions with answers
-  drawn from this code, and a glossary.
-- [notebooks/quotelab.ipynb](notebooks/quotelab.ipynb): rebuilds the key tables and figures of one dataset from its run files.
+| Document | What it covers |
+|---|---|
+| [docs/MODEL.md](docs/MODEL.md) | Every formula, with a notation table and a derivation sketch |
+| [docs/DESIGN.md](docs/DESIGN.md) | Why event-driven, how look-ahead is prevented, how fills are modelled, known approximations |
+| [docs/INTERVIEW_NOTES.md](docs/INTERVIEW_NOTES.md) | Likely interview questions with answers drawn from this code, and a glossary |
+| [notebooks/quotelab.ipynb](notebooks/quotelab.ipynb) | Rebuilds the key tables and figures of one dataset from its run files |
 
 ## Data
 
@@ -236,8 +362,13 @@ make data
 ```
 
 `make data-dry` lists every file with its remote size and the total before anything is fetched.
-`make data` downloads into `data/raw/`, verifies each file against Binance's published SHA-256
-checksum, records it in `data/raw/checksums.json` (so reruns skip completed files), and converts
+
+<details>
+<summary>What <code>make data</code> does</summary>
+
+It downloads public daily files (best bid/offer, trades, 1-minute klines, funding) from
+`data.binance.vision` into `data/raw/`, verifies each file against Binance's published SHA-256
+checksum, records it in `data/raw/checksums.json` so reruns skip completed files, and converts
 the CSVs to Parquet in `data/processed/` with a streaming reader. Downloads above
 `data.max_download_gb` in `config/default.yaml` are refused unless `--allow-large` is passed.
 Both data directories are git-ignored, as are `runs/` and the paper sessions.
@@ -245,33 +376,31 @@ Both data directories are git-ignored, as are `runs/` and the paper sessions.
 The dates and symbols are set in `config/default.yaml`. The first date is used only for
 calibration; each later date is a test day calibrated on the day before it.
 
+</details>
+
 ## Limitations
 
 - **No full L2 depth.** The data is top of book and trade prints, so the queue ahead of an
-  order is estimated from the displayed touch size, not observed. An order placed behind the
-  visible touch has no queue estimate until the touch reaches its price.
-- **No market impact.** Our orders and fills do not move the simulated book or change other
-  traders' behaviour.
-- **Single venue.** One exchange, no cross-venue fair value, hedging or latency races.
-- **Simulated, not live.** Even the paper mode simulates fills locally against the public feed.
-  No order ever reaches an exchange.
-- **Short sample.** A few days per symbol. The bootstrap intervals over test days are wide and
-  only a rough range, not a significance test.
-- **Parameters calibrated on limited data.** Volatility, intensity and the OFI slope come from
-  one previous day; risk thresholds are round numbers chosen by hand, not optimised.
-- **Unverified venue constants.** The maker and taker fees (2 and 5 bps) and the minimum
-  notionals in `config/default.yaml` were not checked against Binance's current fee schedule or
-  exchange rules (the exchange-info endpoint is not reachable from here). E7 shows how results
-  move with the maker fee.
+  order is estimated from the displayed touch size, not observed.
+- **No market impact.** Our orders and fills do not move the simulated book.
+- **Single venue.** No cross-venue fair value, hedging or latency races.
+- **Simulated, not live.** Even paper mode simulates fills locally; no order ever reaches an
+  exchange.
+- **Short sample.** A few days per symbol; the bootstrap intervals are wide and only a rough
+  range, not a significance test.
+- **Limited calibration data.** Volatility, intensity and the OFI slope come from one previous
+  day; risk thresholds are round numbers chosen by hand.
+- **Unverified venue constants.** The maker and taker fees (2 and 5 bps) and minimum notionals in
+  `config/default.yaml` were not checked against Binance's current schedule; E7 shows how
+  results move with the maker fee.
 - **Not investment advice.** Nothing here is a recommendation to trade.
 
 ## What I would do next with real L2 data
 
-- Track the queue from order-level or full-depth data instead of estimating it from the touch,
-  and validate the queue-aware model's fill rates against it.
-- Quote at more than one level and measure how depth behind the touch changes fill rates and
-  adverse selection.
-- Calibrate the fill intensity from the depletion of resting depth, not from taker excursions.
+- Track the queue from order-level or full-depth data and validate the queue-aware fill rates
+  against it.
+- Quote at more than one level and measure how depth changes fill rates and adverse selection.
+- Calibrate the fill intensity from the depletion of resting depth, not taker excursions.
 - Add a market-impact model so large orders and hedges move the simulated book.
 - Use longer samples across calm and stressed months, with out-of-sample risk thresholds.
 - Run multi-venue: a cross-venue fair value and hedging on a second exchange.

@@ -348,3 +348,7 @@ Times are wall-clock on the machine that produced this report and vary with the 
 |---|---|---|---|---|---|---|
 | BTCUSDT | 98 | 29,840,989 | 241.3 | 123,677 | 24,057 | 5,804 |
 | ETHUSDT | 98 | 31,580,746 | 268.1 | 117,780 | 26,775 | 5,804 |
+
+## Resume line
+
+Built QuoteLab, an event-driven market-making simulator in Python (asyncio, DuckDB, polars) with GLFT and Avellaneda-Stoikov quoting, a queue-aware fill model with latency, PnL attribution, markouts, kill switches and a read-only live paper-trading mode; ran 196 backtests over 4 test days of Binance BTCUSDT/ETHUSDT data (6.0 billion market events replayed in total) and found the baseline breaks even only with a maker rebate (break-even maker fee BTCUSDT -0.79 bps, ETHUSDT -0.81 bps).

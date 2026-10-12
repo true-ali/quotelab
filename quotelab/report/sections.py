@@ -27,6 +27,8 @@ SAME_USD = 1e-6
 PROSE_HORIZON_S = 5
 NORMAL_95 = 1.96
 NS_PER_MINUTE = 60_000_000_000
+MILLION = 1e6
+BILLION = 1e9
 FIGURES = {
     "calibration": "figures/calibration.png",
     "e1": "figures/e1_realism_ladder.png",
@@ -84,6 +86,30 @@ def one_row(frame: pl.DataFrame, **equal: Any) -> Row:
 
 def symbols_in(frame: pl.DataFrame) -> list[str]:
     return frame["symbol"].unique(maintain_order=True).to_list()
+
+
+def market_events(t: ReportTables) -> float:
+    """Market events replayed across every run of the dataset."""
+    return float((t.run_cost["runs"] * t.run_cost["mean_events_per_run"]).sum())
+
+
+def market_events_scaled(t: ReportTables) -> tuple[str, str]:
+    """The market events replayed as a short number and its unit, ``("6.0", "billion")`` or
+    ``("37.5", "million")``, so a small dataset does not read as 0.0 billion."""
+    events = market_events(t)
+    if events >= BILLION:
+        return f"{events / BILLION:,.1f}", "billion"
+    return f"{events / MILLION:,.1f}", "million"
+
+
+def needs_rebate(t: ReportTables) -> bool:
+    """True when every symbol's break-even maker fee is below zero, so only a rebate pays."""
+    return bool((t.break_even["break_even_maker_bps"] < 0).all())
+
+
+def rung_pnl(t: ReportTables, symbol: str, rung: str) -> str:
+    """Mean daily PnL of one E1 rung for one symbol, as a signed dollar amount."""
+    return usd(one_row(t.realism, symbol=symbol, variant=rung)["pnl_mean"])
 
 
 def frame_table(title: str, frame: pl.DataFrame, columns: list[Column]) -> Table:

@@ -416,15 +416,18 @@ def readme_block(
     assumed = session.meta["config"]["engine"]["data_latency_ms"]
     return "\n".join(
         [
-            "### QuoteLab paper session",
+            f"`{session.meta['symbol']}`, live window {utc_time(start)} to {utc_time(end)} UTC.",
             "",
-            f"- `{session.meta['symbol']}`, live window {utc_time(start)} to {utc_time(end)} UTC: "
-            f"paper PnL {usd(paper['pnl'])} with {paper['quote_fills']:.0f} quote fills, replay "
-            f"{usd(replayed['pnl'])} with {replayed['quote_fills']:.0f}. {divergence}",
-            f"- Feed: {stats['book_messages'] + stats['trade_messages']:,} messages, "
-            f"{stats['reconnects']} reconnects, {fmt_pct(stats['clamped_share'], 2)} clamped, "
-            f"median delay {fmt(stats['lateness_p50_ms'], 1)} ms against the {assumed} ms the "
-            "engine assumes.",
+            "| | Paper (live feed) | Replay (backtest) |",
+            "|---|--:|--:|",
+            f"| PnL | {usd(paper['pnl'])} | {usd(replayed['pnl'])} |",
+            f"| Quote fills | {paper['quote_fills']:,.0f} | {replayed['quote_fills']:,.0f} |",
+            "",
+            f"- **Fills.** {divergence}",
+            f"- **Feed.** {stats['book_messages'] + stats['trade_messages']:,} messages, "
+            f"{stats['reconnects']} reconnects, {fmt_pct(stats['clamped_share'], 2)} clamped to "
+            f"the engine clock, median delay {fmt(stats['lateness_p50_ms'], 1)} ms against the "
+            f"{assumed} ms the engine assumes.",
             "",
             f"![Paper session vs replay]({base}/{FIGURE})",
             "",
@@ -452,14 +455,15 @@ def write_comparison(
     stats = feed_stats(session)
     out = live.reports_dir / path.name
     assumed = float(session.meta["config"]["engine"]["data_latency_ms"])
-    figures.paper_comparison(
-        paper.timeseries,
-        replayed.timeseries,
-        session.window[0],
-        lateness_ms(session),
-        assumed,
-        out / FIGURE,
-    )
+    with figures.styled():
+        figures.paper_comparison(
+            paper.timeseries,
+            replayed.timeseries,
+            session.window[0],
+            lateness_ms(session),
+            assumed,
+            out / FIGURE,
+        )
     sections = comparison_sections(session, paper, replayed, rows, stats)
     document = out / "COMPARISON.md"
     document.write_text(markdown_document(TITLE, intro(session), sections))

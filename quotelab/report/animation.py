@@ -15,16 +15,13 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
+from quotelab.report import figures
 from quotelab.report.figures import (
-    BACKGROUND,
     BLUE,
     GREEN,
-    LEGEND_FONTSIZE,
     ORANGE,
     PURPLE,
-    TEXT,
     VERMILION,
-    _style,
 )
 from quotelab.report.tables import RunOutputs
 
@@ -32,9 +29,11 @@ WINDOW_S = 60
 FRAME_STEP_S = 1
 FPS = 12
 HOLD_FRAMES = 12
-GIF_DPI = 80
+GIF_DPI = 125
 FIGSIZE = (8.0, 6.0)
 HEIGHT_RATIOS = (3, 1, 1)
+PRICE_LINE_WIDTH = 1.8
+FILL_MARKER_SIZE = 8
 NS_PER_S = 1_000_000_000
 MARGIN = 0.1
 FLAT_PAD = 0.5
@@ -137,7 +136,8 @@ def _price_tracks(ax: Axes, series: pl.DataFrame, quotes: pl.DataFrame) -> list[
             series["bid"],
             drawstyle="steps-post",
             color=BLUE,
-            label="market best bid",
+            linewidth=PRICE_LINE_WIDTH,
+            label="best bid",
         ),
         _track(
             ax,
@@ -145,7 +145,8 @@ def _price_tracks(ax: Axes, series: pl.DataFrame, quotes: pl.DataFrame) -> list[
             series["ask"],
             drawstyle="steps-post",
             color=ORANGE,
-            label="market best ask",
+            linewidth=PRICE_LINE_WIDTH,
+            label="best ask",
         ),
         _track(
             ax,
@@ -153,8 +154,9 @@ def _price_tracks(ax: Axes, series: pl.DataFrame, quotes: pl.DataFrame) -> list[
             buys["px"],
             linestyle="none",
             marker="^",
+            markersize=FILL_MARKER_SIZE,
             color=GREEN,
-            label="our buy fills",
+            label="our buys",
         ),
         _track(
             ax,
@@ -162,18 +164,12 @@ def _price_tracks(ax: Axes, series: pl.DataFrame, quotes: pl.DataFrame) -> list[
             sells["px"],
             linestyle="none",
             marker="v",
+            markersize=FILL_MARKER_SIZE,
             color=VERMILION,
-            label="our sell fills",
+            label="our sells",
         ),
     ]
-    ax.legend(
-        loc="lower left",
-        bbox_to_anchor=(0.0, 1.0),
-        ncols=len(tracks),
-        frameon=False,
-        fontsize=LEGEND_FONTSIZE,
-        labelcolor=TEXT,
-    )
+    ax.legend(loc="lower left", bbox_to_anchor=(0.0, 1.0), ncols=len(tracks))
     return tracks
 
 
@@ -203,24 +199,24 @@ def replay_animation(timeseries: pl.DataFrame, fills: pl.DataFrame, title: str, 
     start = busiest_window_start(fills, window_ns)
     series = _in_window(timeseries, start, window_ns)
     quotes = _in_window(fills.filter(pl.col("kind") == QUOTE_KIND), start, window_ns)
-    fig = Figure(figsize=FIGSIZE, facecolor=BACKGROUND, layout="constrained")
-    FigureCanvasAgg(fig)
-    fig.suptitle(title, color=TEXT)
-    axes = fig.subplots(
-        len(HEIGHT_RATIOS), 1, sharex=True, gridspec_kw={"height_ratios": HEIGHT_RATIOS}
-    )
-    for ax in axes:
-        _style(ax)
-        ax.set_xlim(0, WINDOW_S)
-    axes[-1].set_xlabel("seconds into the window")
-    fig.align_ylabels(axes)
-    tracks = [
-        *_price_tracks(axes[0], series, quotes),
-        *_position_tracks(axes[1], series),
-        *_equity_tracks(axes[2], series),
-    ]
-    frames = list(range(FRAME_STEP_S, WINDOW_S + 1, FRAME_STEP_S)) + [WINDOW_S] * HOLD_FRAMES
-    out.parent.mkdir(parents=True, exist_ok=True)
-    animation = FuncAnimation(fig, lambda t: _reveal(tracks, t), frames=frames, blit=False)
-    animation.save(out, writer=PillowWriter(fps=FPS), dpi=GIF_DPI)
+    with figures.styled():
+        fig = Figure(figsize=FIGSIZE, layout="constrained")
+        FigureCanvasAgg(fig)
+        fig.suptitle(title, x=figures.TITLE_X, ha="left")
+        axes = fig.subplots(
+            len(HEIGHT_RATIOS), 1, sharex=True, gridspec_kw={"height_ratios": HEIGHT_RATIOS}
+        )
+        for ax in axes:
+            ax.set_xlim(0, WINDOW_S)
+        axes[-1].set_xlabel("seconds into the window")
+        fig.align_ylabels(axes)
+        tracks = [
+            *_price_tracks(axes[0], series, quotes),
+            *_position_tracks(axes[1], series),
+            *_equity_tracks(axes[2], series),
+        ]
+        frames = list(range(FRAME_STEP_S, WINDOW_S + 1, FRAME_STEP_S)) + [WINDOW_S] * HOLD_FRAMES
+        out.parent.mkdir(parents=True, exist_ok=True)
+        animation = FuncAnimation(fig, lambda t: _reveal(tracks, t), frames=frames, blit=False)
+        animation.save(out, writer=PillowWriter(fps=FPS), dpi=GIF_DPI)
     return out
